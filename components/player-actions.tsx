@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Target, Shield, Eye, Crosshair, Zap, Heart, Skull } from "lucide-react"
@@ -22,7 +22,22 @@ export function PlayerActions({ actions }: PlayerActionsProps) {
 
   useEffect(() => {
     // Show only the last 3 actions
-    setVisibleActions(actions.slice(-3))
+    const recentActions = actions.slice(-3)
+    setVisibleActions(recentActions)
+
+    // Auto-hide actions after 5 seconds
+    const timeouts = recentActions.map((action, index) => {
+      return setTimeout(
+        () => {
+          setVisibleActions((prev) => prev.filter((a) => a.timestamp !== action.timestamp))
+        },
+        5000 + index * 1000,
+      ) // Stagger the hiding
+    })
+
+    return () => {
+      timeouts.forEach((timeout) => clearTimeout(timeout))
+    }
   }, [actions])
 
   const getActionIcon = (action: string) => {
@@ -71,18 +86,17 @@ export function PlayerActions({ actions }: PlayerActionsProps) {
 
   return (
     <div className="fixed top-20 right-4 z-40 space-y-2">
-      {visibleActions.map((action, index) => (
+      {visibleActions.map((action) => (
         <Card
-          key={`${action.playerId}-${action.timestamp}`}
-          className="bg-black/80 border-red-800 text-white animate-in slide-in-from-right duration-300"
-          style={{ animationDelay: `${index * 100}ms` }}
+          key={`${action.playerId}_${action.timestamp}`}
+          className="border-red-800 bg-black/90 text-white animate-in slide-in-from-right duration-300"
         >
           <CardContent className="p-3">
             <div className="flex items-center gap-2">
               <Badge className={`${getActionColor(action.action)} text-white`}>{getActionIcon(action.action)}</Badge>
-              <div className="text-sm">
-                <span className="font-semibold text-blue-400">{action.playerName}</span>
-                <span className="ml-1 text-white">{action.message}</span>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-red-300">{action.playerName}</p>
+                <p className="text-xs text-white">{action.message}</p>
               </div>
             </div>
           </CardContent>

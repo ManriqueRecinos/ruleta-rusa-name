@@ -1,12 +1,13 @@
 "use client"
 
+import type React from "react"
+
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Send, MessageCircle } from "lucide-react"
-import { socketManager } from "@/lib/socket"
+import { MessageCircle, Send, X } from "lucide-react"
+import { realtimeClient } from "@/lib/realtime-client"
 
 interface ChatMessage {
   id: string
@@ -14,12 +15,6 @@ interface ChatMessage {
   playerName: string
   message: string
   timestamp: number
-  type: "message" | "system" | "action"
-}
-
-interface TypingIndicator {
-  playerId: number
-  playerName: string
 }
 
 interface ChatProps {
@@ -31,30 +26,21 @@ interface ChatProps {
 export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState("")
-  const [typingUsers, setTypingUsers] = useState<TypingIndicator[]>([])
   const [isTyping, setIsTyping] = useState(false)
+  const [typingUsers, setTypingUsers] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout>()
 
   useEffect(() => {
-    const socket = socketManager.getSocket()
-    if (!socket) return
-
-    const handleMessageReceived = (data: {
-      playerId: number
-      playerName: string
-      message: string
-      timestamp: number
-    }) => {
-      const newMsg: ChatMessage = {
-        id: `${data.playerId}-${data.timestamp}`,
+    const handleChatMessage = (data: { playerId: number; playerName: string; message: string; timestamp: number }) => {
+      const chatMessage: ChatMessage = {
+        id: `${data.playerId}_${data.timestamp}`,
         playerId: data.playerId,
         playerName: data.playerName,
         message: data.message,
         timestamp: data.timestamp,
-        type: "message",
       }
-      setMessages((prev) => [...prev, newMsg])
+      setMessages((prev) => [...prev, chatMessage])
     }
 
     const handleTypingStatus = (data: { playerId: number; playerName: string; isTyping: boolean }) => {
@@ -62,42 +48,47 @@ export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
 
       setTypingUsers((prev) => {
         if (data.isTyping) {
-          return prev.find((u) => u.playerId === data.playerId)
-            ? prev
-            : [...prev, { playerId: data.playerId, playerName: data.playerName }]
+          return prev.includes(data.playerName) ? prev : [...prev, data.playerName]
         } else {
-          return prev.filter((u) => u.playerId !== data.playerId)
+          return prev.filter((name) => name !== data.playerName)
         }
       })
     }
 
-    socket.on("chat:messageReceived", handleMessageReceived)
-    socket.on("player:typingStatus", handleTypingStatus)
+    realtimeClient.on("chat:messageReceived", handleChatMessage)
+    realtimeClient.on("player:typingStatus", handleTypingStatus)
 
     return () => {
-      socket.off("chat:messageReceived", handleMessageReceived)
-      socket.off("player:typingStatus", handleTypingStatus)
+      realtimeClient.off("chat:messageReceived", handleChatMessage)
+      realtimeClient.off("player:typingStatus", handleTypingStatus)
     }
   }, [currentPlayerId])
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+    scrollToBottom()
   }, [messages])
 
-  const handleSendMessage = () => {
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  const sendMessage = async () => {
     if (!newMessage.trim()) return
 
-    socketManager.emit("chat:message", { message: newMessage.trim() })
-    setNewMessage("")
-    handleStopTyping()
+    const success = await realtimeClient.emit("chat:message", { message: newMessage.trim() })
+    if (success) {
+      setNewMessage("")
+      setIsTyping(false)
+      realtimeClient.emit("player:typing", { isTyping: false })
+    }
   }
 
   const handleInputChange = (value: string) => {
     setNewMessage(value)
 
-    if (value.trim() && !isTyping) {
+    if (!isTyping && value.trim()) {
       setIsTyping(true)
-      socketManager.emit("player:typing", { isTyping: true })
+      realtimeClient.emit("player:typing", { isTyping: true })
     }
 
     // Clear existing timeout
@@ -107,88 +98,75 @@ export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
 
     // Set new timeout to stop typing indicator
     typingTimeoutRef.current = setTimeout(() => {
-      handleStopTyping()
-    }, 1000)
-  }
-
-  const handleStopTyping = () => {
-    if (isTyping) {
       setIsTyping(false)
-      socketManager.emit("player:typing", { isTyping: false })
-    }
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current)
-    }
+      realtimeClient.emit("player:typing", { isTyping: false })
+    }, 2000)
   }
 
-  const addSystemMessage = (message: string) => {
-    const systemMsg: ChatMessage = {
-      id: `system-${Date.now()}`,
-      playerId: -1,
-      playerName: "Sistema",
-      message,
-      timestamp: Date.now(),
-      type: "system",
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage()
     }
-    setMessages((prev) => [...prev, systemMsg])
   }
 
   if (!isOpen) {
     return (
-      <Button onClick={onToggle} className="fixed bottom-4 right-4 bg-blue-600 hover:bg-blue-500 rounded-full p-3 z-50">
+      <Button onClick={onToggle} className="fixed bottom-4 right-4 z-50 bg-red-600 hover:bg-red-500 rounded-full p-3">
         <MessageCircle className="h-6 w-6" />
       </Button>
     )
   }
 
   return (
-    <Card className="fixed bottom-4 right-4 w-80 h-96 bg-black/90 border-red-800 text-white z-50">
+    <Card className="fixed bottom-4 right-4 z-50 w-80 h-96 border-red-800 bg-black/90 text-white">
       <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-lg text-red-300">Chat</CardTitle>
-          <Button variant="ghost" size="sm" onClick={onToggle} className="text-red-300 hover:text-white">
-            ×
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="p-3 flex flex-col h-full">
-        <ScrollArea className="flex-1 mb-3">
-          <div className="space-y-2">
-            {messages.map((msg) => (
-              <div key={msg.id} className="text-sm">
-                {msg.type === "system" ? (
-                  <div className="text-yellow-400 italic text-center">{msg.message}</div>
-                ) : (
-                  <div>
-                    <span className="text-blue-400 font-semibold">{msg.playerName}:</span>
-                    <span className="ml-2 text-white">{msg.message}</span>
-                  </div>
-                )}
-              </div>
-            ))}
-            {typingUsers.length > 0 && (
-              <div className="text-xs text-gray-400 italic">
-                {typingUsers.map((u) => u.playerName).join(", ")} está escribiendo...
-              </div>
-            )}
-            <div ref={messagesEndRef} />
+        <CardTitle className="flex items-center justify-between text-lg">
+          <div className="flex items-center gap-2">
+            <MessageCircle className="h-5 w-5" />
+            Chat
           </div>
-        </ScrollArea>
+          <Button onClick={onToggle} size="sm" variant="ghost" className="text-red-300 hover:text-white">
+            <X className="h-4 w-4" />
+          </Button>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col h-full p-4 pt-0">
+        <div className="flex-1 overflow-y-auto space-y-2 mb-4">
+          {messages.map((message) => (
+            <div
+              key={message.id}
+              className={`p-2 rounded-lg ${
+                message.playerId === currentPlayerId ? "bg-red-600/50 ml-4" : "bg-red-950/50 mr-4"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs font-semibold text-red-300">{message.playerName}</span>
+                <span className="text-xs text-red-400">{new Date(message.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <p className="text-sm text-white">{message.message}</p>
+            </div>
+          ))}
+
+          {typingUsers.length > 0 && (
+            <div className="text-xs text-red-400 italic">
+              {typingUsers.join(", ")} {typingUsers.length === 1 ? "está" : "están"} escribiendo...
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
 
         <div className="flex gap-2">
           <Input
             value={newMessage}
             onChange={(e) => handleInputChange(e.target.value)}
-            onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
+            onKeyPress={handleKeyPress}
             placeholder="Escribe un mensaje..."
             className="bg-red-950/50 border-red-700 text-white placeholder:text-red-300"
+            maxLength={200}
           />
-          <Button
-            onClick={handleSendMessage}
-            disabled={!newMessage.trim()}
-            size="sm"
-            className="bg-blue-600 hover:bg-blue-500"
-          >
+          <Button onClick={sendMessage} disabled={!newMessage.trim()} size="sm" className="bg-red-600 hover:bg-red-500">
             <Send className="h-4 w-4" />
           </Button>
         </div>

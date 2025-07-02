@@ -6,9 +6,22 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
-import { Users, Target, Skull, Shield, Eye, Crosshair, Zap, Heart, Coins, Dice1, Copy, Wifi } from "lucide-react"
-import { socketManager } from "@/lib/socket"
+import {
+  Users,
+  Target,
+  Skull,
+  Shield,
+  Eye,
+  Crosshair,
+  Zap,
+  Heart,
+  Coins,
+  Dice1,
+  Copy,
+  Wifi,
+  AlertTriangle,
+} from "lucide-react"
+import { realtimeClient } from "@/lib/realtime-client"
 import { authManager, type PlayerSession } from "@/lib/auth"
 import { Chat } from "@/components/chat"
 import { ConnectionStatus } from "@/components/connection-status"
@@ -37,6 +50,7 @@ interface GameEvent {
 interface Participant {
   id: number
   name: string
+  playerId: string
   isAlive: boolean
   power: PowerType
   powerUsed: boolean
@@ -141,6 +155,7 @@ export default function Component() {
   const [isConnected, setIsConnected] = useState(false)
   const [isChatOpen, setIsChatOpen] = useState(false)
   const [playerActions, setPlayerActions] = useState<PlayerAction[]>([])
+  const [connectionError, setConnectionError] = useState<string | null>(null)
 
   // Game states
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0)
@@ -159,7 +174,7 @@ export default function Component() {
   const [skipNextTurn, setSkipNextTurn] = useState(false)
   const [doubleTurn, setDoubleTurn] = useState(false)
 
-  // Initialize socket connection and session
+  // Initialize session and connection
   useEffect(() => {
     const existingSession = authManager.getSession()
     if (existingSession) {
@@ -167,39 +182,44 @@ export default function Component() {
       setPlayerName(existingSession.playerName)
     }
 
-    const socket = socketManager.connect()
-
-    const handleConnect = () => {
-      setIsConnected(true)
-      console.log("Connected to server")
-    }
-
-    const handleDisconnect = () => {
-      setIsConnected(false)
-      console.log("Disconnected from server")
-    }
-
-    socket.on("connect", handleConnect)
-    socket.on("disconnect", handleDisconnect)
-
-    setIsConnected(socket.connected)
-
-    return () => {
-      socket.off("connect", handleConnect)
-      socket.off("disconnect", handleDisconnect)
-    }
+    // Initialize connection
+    initializeConnection()
   }, [])
+
+  const initializeConnection = async () => {
+    try {
+      setConnectionError(null)
+      const connected = await realtimeClient.connect()
+      setIsConnected(connected)
+      
+      if (!connected) {
+        setConnectionError("No se pudo establecer conexión con el servidor")
+      }
+    } catch (error) {
+      console.error("Connection initialization failed:", error)
+      setConnectionError("Error al inicializar la conexión")
+      setIsConnected(false)
+    }
+  }
 
   // Socket event handlers
   useEffect(() => {
-    const socket = socketManager.getSocket()
-    if (!socket) return
+    const handleConnectionStatus = (data: { status: string }) => {
+      setIsConnected(data.status === 'connected')
+      
+      if (data.status === 'error') {
+        setConnectionError("Error de conexión - Reintentando...")
+      } else if (data.status === 'connected') {
+        setConnectionError(null)
+      }
+    }
 
     const handleRoomCreated = (data: { roomId: string; room: Room }) => {
       setCurrentRoom(data.room)
       setGameMode("game")
       setGameState(data.room.gameState)
       authManager.updateSession({ roomId: data.roomId })
+      realtimeClient.setRoomId(data.roomId)
       addToLog(`Sala "${data.room.name}" creada`)
     }
 
@@ -208,6 +228,7 @@ export default function Component() {
       setGameMode("game")
       setGameState(data.room.gameState)
       authManager.updateSession({ roomId: data.room.id })
+      realtimeClient.setRoomId(data.room.id)
       addToLog(`Te uniste a la sala "${data.room.name}"`)
     }
 
@@ -222,6 +243,7 @@ export default function Component() {
     const handleRoomError = (data: { message: string }) => {
       console.error("Room error:", data.message)
       addToLog(`Error: ${data.message}`)
+      setConnectionError(data.message)
     }
 
     const handleGameStateChanged = (data: { gameState: GameState; room: Room }) => {
@@ -255,24 +277,26 @@ export default function Component() {
       addToLog(`${data.playerName} se reconectó`)
     }
 
-    socket.on("room:created", handleRoomCreated)
-    socket.on("room:joined", handleRoomJoined)
-    socket.on("room:updated", handleRoomUpdated)
-    socket.on("room:error", handleRoomError)
-    socket.on("game:stateChanged", handleGameStateChanged)
-    socket.on("game:playerAction", handlePlayerAction)
-    socket.on("player:disconnect", handlePlayerDisconnect)
-    socket.on("player:reconnect", handlePlayerReconnect)
+    realtimeClient.on('connection:statusChanged', handleConnectionStatus)
+    realtimeClient.on('room:created', handleRoomCreated)
+    realtimeClient.on('room:joined', handleRoomJoined)
+    realtimeClient.on('room:updated', handleRoomUpdated)
+    realtimeClient.on('room:error', handleRoomError)
+    realtimeClient.on('game:stateChanged', handleGameStateChanged)
+    realtimeClient.on('game:playerAction', handlePlayerAction)
+    realtimeClient.on('player:disconnect', handlePlayerDisconnect)
+    realtimeClient.on('player:reconnect', handlePlayerReconnect)
 
     return () => {
-      socket.off("room:created", handleRoomCreated)
-      socket.off("room:joined", handleRoomJoined)
-      socket.off("room:updated", handleRoomUpdated)
-      socket.off("room:error", handleRoomError)
-      socket.off("game:stateChanged", handleGameStateChanged)
-      socket.off("game:playerAction", handlePlayerAction)
-      socket.off("player:disconnect", handlePlayerDisconnect)
-      socket.off("player:reconnect", handlePlayerReconnect)
+      realtimeClient.off('connection:statusChanged', handleConnectionStatus)
+      realtimeClient.off('room:created', handleRoomCreated)
+      realtimeClient.off('room:joined', handleRoomJoined)
+      realtimeClient.off('room:updated', handleRoomUpdated)
+      realtimeClient.off('room:error', handleRoomError)
+      realtimeClient.off('game:stateChanged', handleGameStateChanged)
+      realtimeClient.off('game:playerAction', handlePlayerAction)
+      realtimeClient.off('player:disconnect', handlePlayerDisconnect)
+      realtimeClient.off('player:reconnect', handlePlayerReconnect)
     }
   }, [currentRoom])
 
@@ -280,7 +304,7 @@ export default function Component() {
     setGameLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`])
   }, [])
 
-  const createRoom = () => {
+  const createRoom = async () => {
     if (!playerName.trim() || !roomName.trim()) return
 
     let currentSession = session
@@ -289,13 +313,17 @@ export default function Component() {
       setSession(currentSession)
     }
 
-    socketManager.emit("room:create", {
+    const success = await realtimeClient.emit("room:create", {
       roomName: roomName.trim(),
       playerName: playerName.trim(),
     })
+
+    if (!success) {
+      setConnectionError("Error al crear la sala")
+    }
   }
 
-  const joinRoom = () => {
+  const joinRoom = async () => {
     if (!playerName.trim() || !roomCode.trim()) return
 
     let currentSession = session
@@ -304,18 +332,23 @@ export default function Component() {
       setSession(currentSession)
     }
 
-    socketManager.emit("room:join", {
+    const success = await realtimeClient.emit("room:join", {
       roomCode: roomCode.trim().toUpperCase(),
       playerName: playerName.trim(),
     })
+
+    if (!success) {
+      setConnectionError("Error al unirse a la sala")
+    }
   }
 
-  const leaveRoom = () => {
-    socketManager.emit("room:leave")
+  const leaveRoom = async () => {
+    await realtimeClient.emit("room:leave")
     setCurrentRoom(null)
     setGameMode("menu")
     setGameState("lobby")
     authManager.updateSession({ roomId: undefined })
+    realtimeClient.setRoomId(null)
     resetGameState()
   }
 
@@ -326,20 +359,32 @@ export default function Component() {
     }
   }
 
-  const startGame = () => {
-    socketManager.emit("game:start")
+  const startGame = async () => {
+    const success = await realtimeClient.emit("game:start")
+    if (!success) {
+      setConnectionError("Error al iniciar el juego")
+    }
   }
 
-  const selectPower = (power: PowerType) => {
-    socketManager.emit("game:selectPower", { power })
+  const selectPower = async (power: PowerType) => {
+    const success = await realtimeClient.emit("game:selectPower", { power })
+    if (!success) {
+      setConnectionError("Error al seleccionar poder")
+    }
   }
 
-  const shoot = () => {
-    socketManager.emit("game:shoot")
+  const shoot = async () => {
+    const success = await realtimeClient.emit("game:shoot")
+    if (!success) {
+      setConnectionError("Error al disparar")
+    }
   }
 
-  const shootTarget = (targetId: number) => {
-    socketManager.emit("game:targetShoot", { targetId })
+  const shootTarget = async (targetId: number) => {
+    const success = await realtimeClient.emit("game:targetShoot", { targetId })
+    if (!success) {
+      setConnectionError("Error al disparar al objetivo")
+    }
   }
 
   const resetGameState = () => {
@@ -363,13 +408,41 @@ export default function Component() {
     leaveRoom()
   }
 
-  // Show connection status if not connected
+  const retryConnection = () => {
+    setConnectionError(null)
+    initializeConnection()
+  }
+
+  // Show connection error screen
+  if (connectionError && !isConnected) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4 flex items-center justify-center">
+        <Card className="border-red-800 bg-black/80 text-white max-w-md">
+          <CardContent className="p-8 text-center">
+            <AlertTriangle className="h-16 w-16 mx-auto mb-4 text-red-400" />
+            <h2 className="text-2xl font-bold text-red-400 mb-2">Error de Conexión</h2>
+            <p className="text-red-300 mb-4">{connectionError}</p>
+            <div className="space-y-2">
+              <Button onClick={retryConnection} className="w-full bg-red-600 hover:bg-red-500">
+                Reintentar Conexión
+              </Button>
+              <p className="text-xs text-red-400">
+                Nota: Este juego requiere conexión a internet para funcionar en modo multijugador
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  // Show loading screen while connecting
   if (!isConnected) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4 flex items-center justify-center">
         <Card className="border-red-800 bg-black/80 text-white">
           <CardContent className="p-8 text-center">
-            <Wifi className="h-16 w-16 mx-auto mb-4 text-red-400" />
+            <Wifi className="h-16 w-16 mx-auto mb-4 text-red-400 animate-pulse" />
             <h2 className="text-2xl font-bold text-red-400 mb-2">Conectando al servidor...</h2>
             <p className="text-red-300">Por favor espera mientras establecemos la conexión</p>
           </CardContent>
@@ -543,6 +616,16 @@ export default function Component() {
             </div>
           </CardHeader>
           <CardContent className="space-y-6">
+            {/* Connection Error Banner */}
+            {connectionError && (
+              <div className="bg-red-900/50 border border-red-600 p-3 rounded-lg text-center">
+                <p className="text-red-300">{connectionError}</p>
+                <Button onClick={retryConnection} size="sm" className="mt-2 bg-red-600 hover:bg-red-500">
+                  Reintentar
+                </Button>
+              </div>
+            )}
+
             {/* Current Event Display */}
             {currentEvent && (
               <div className="bg-yellow-900/50 border border-yellow-600 p-4 rounded-lg text-center">
@@ -601,286 +684,4 @@ export default function Component() {
                     className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3"
                   >
                     {currentRoom.participants.length < 2 ? "Necesitas al menos 2 jugadores" : "Comenzar Juego"}
-                  </Button>
-                )}
-
-                {playerName !== currentRoom.host && (
-                  <div className="text-center text-red-300">Esperando que el host inicie el juego...</div>
-                )}
-              </div>
-            )}
-
-            {/* Powers Selection Phase */}
-            {gameState === "powers" && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold text-red-300 mb-2">Selección de Poderes - Ronda {round}</h2>
-                  <p className="text-red-400">
-                    Turno de:{" "}
-                    <span className="font-bold text-white">
-                      {currentRoom.participants[currentPowerSelection]?.name}
-                    </span>
-                  </p>
-                  <p className="text-sm text-red-300 mt-1">
-                    ({currentPowerSelection + 1}/{currentRoom.participants.length})
-                  </p>
-                </div>
-
-                {currentRoom.participants[currentPowerSelection]?.name === playerName ? (
-                  <div className="grid gap-4">
-                    {POWERS.map((power) => (
-                      <Card
-                        key={power.id}
-                        className={`cursor-pointer transition-all border-2 ${
-                          myParticipant?.power === power.id
-                            ? "border-yellow-500 bg-yellow-900/20"
-                            : "border-red-800 bg-red-950/30 hover:border-red-600"
-                        }`}
-                        onClick={() => selectPower(power.id)}
-                      >
-                        <CardContent className="p-4">
-                          <div className="flex items-center gap-3">
-                            <div className={`p-2 rounded-lg ${power.color}`}>{power.icon}</div>
-                            <div className="flex-1">
-                              <h3 className="font-bold text-white">{power.name}</h3>
-                              <p className="text-sm text-red-300">{power.description}</p>
-                            </div>
-                            {myParticipant?.power === power.id && <Badge className="bg-yellow-600">Seleccionado</Badge>}
-                          </div>
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center text-red-300">
-                    Esperando que {currentRoom.participants[currentPowerSelection]?.name} seleccione su poder...
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Playing Phase */}
-            {gameState === "playing" && (
-              <div className="space-y-6">
-                <div className="text-center space-y-2">
-                  <div className="flex items-center justify-center gap-4 flex-wrap">
-                    <Badge className="bg-red-700 text-white px-4 py-2 text-lg">Balas: {bulletsLeft}</Badge>
-                    <Badge className="bg-green-700 text-white px-4 py-2 text-lg">Vivos: {alivePlayers.length}</Badge>
-                    <Badge className="bg-purple-700 text-white px-4 py-2 text-lg">
-                      Ronda: {round}/{maxRounds}
-                    </Badge>
-                  </div>
-                </div>
-
-                <Separator className="bg-red-800" />
-
-                <div className="text-center space-y-4">
-                  <h3 className="text-2xl font-bold text-red-300">Turno de:</h3>
-                  <div className="bg-red-950/50 p-6 rounded-lg border-2 border-red-600">
-                    <p className="text-3xl font-bold text-white mb-2">{currentPlayer?.name}</p>
-                    <div className="flex items-center justify-center gap-4 text-sm">
-                      {currentPlayer?.power && (
-                        <div className="flex items-center gap-2">
-                          <div className={`p-1 rounded ${POWERS.find((p) => p.id === currentPlayer.power)?.color}`}>
-                            {POWERS.find((p) => p.id === currentPlayer.power)?.icon}
-                          </div>
-                          <span className={currentPlayer.powerUsed ? "text-gray-400 line-through" : "text-white"}>
-                            {POWERS.find((p) => p.id === currentPlayer.power)?.name}
-                          </span>
-                        </div>
-                      )}
-                      <Badge className="bg-green-700">
-                        <Heart className="h-3 w-3 mr-1" />
-                        {currentPlayer?.lives}
-                      </Badge>
-                      <Badge className="bg-blue-700">
-                        <Coins className="h-3 w-3 mr-1" />
-                        {currentPlayer?.points}
-                      </Badge>
-                      {currentPlayer?.cursed && (
-                        <Badge className="bg-purple-700">
-                          <Skull className="h-3 w-3 mr-1" />
-                          Maldito
-                        </Badge>
-                      )}
-                      {!currentPlayer?.isConnected && <Badge className="bg-red-600">DESCONECTADO</Badge>}
-                    </div>
-                  </div>
-
-                  {lastShot && (
-                    <div
-                      className={`p-4 rounded-lg ${lastShot === "safe" ? "bg-green-900/50 border border-green-600" : "bg-red-900/50 border border-red-600"}`}
-                    >
-                      <p className="text-lg font-semibold">
-                        {lastShot === "safe" ? "¡Disparo seguro! 🍀" : "¡BALA! 💀"}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Bullet Target Mode */}
-                  {bulletTargetMode && currentPlayer?.name === playerName && (
-                    <div className="space-y-4">
-                      <h4 className="text-lg font-bold text-red-300">¡Tienes una BALA! Elige tu objetivo:</h4>
-                      <div className="grid gap-2">
-                        {currentRoom.participants
-                          .filter((p) => p.isAlive)
-                          .map((player) => (
-                            <Button
-                              key={player.id}
-                              onClick={() => shootTarget(player.id)}
-                              className="bg-red-700 hover:bg-red-600 flex items-center justify-between"
-                            >
-                              <div className="flex items-center gap-2">
-                                <Target className="h-4 w-4" />
-                                {player.name}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                {player.power === "block" && !player.powerUsed && (
-                                  <Shield className="h-4 w-4 text-blue-400" />
-                                )}
-                                <Badge variant="outline" className="border-green-600 text-green-300">
-                                  <Heart className="h-3 w-3 mr-1" />
-                                  {player.lives}
-                                </Badge>
-                              </div>
-                            </Button>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {!bulletTargetMode && currentPlayer?.name === playerName && currentPlayer?.isConnected && (
-                    <Button
-                      onClick={shoot}
-                      className="bg-red-600 hover:bg-red-500 text-white font-bold py-4 px-8 text-xl"
-                    >
-                      <Target className="h-6 w-6 mr-2" />
-                      DISPARAR
-                    </Button>
-                  )}
-
-                  {currentPlayer?.name !== playerName && (
-                    <div className="text-center text-red-300">Esperando que {currentPlayer?.name} tome su turno...</div>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <h4 className="text-lg font-semibold text-red-300">Jugadores:</h4>
-                  <div className="grid gap-2">
-                    {alivePlayers.map((participant, index) => (
-                      <div
-                        key={participant.id}
-                        className={`flex items-center gap-2 p-3 rounded-lg border ${
-                          index === currentPlayerIndex ? "bg-red-700/50 border-red-500" : "bg-red-950/30 border-red-800"
-                        }`}
-                      >
-                        <Badge variant="outline" className="border-red-600 text-red-300">
-                          #{index + 1}
-                        </Badge>
-                        <span
-                          className={`${index === currentPlayerIndex ? "font-bold text-white" : "text-red-200"} ${!participant.isConnected ? "opacity-50" : ""}`}
-                        >
-                          {participant.name}
-                        </span>
-                        <div className="flex items-center gap-1 ml-auto">
-                          {participant.power && (
-                            <div
-                              className={`p-1 rounded ${POWERS.find((p) => p.id === participant.power)?.color} ${participant.powerUsed ? "opacity-50" : ""}`}
-                            >
-                              {POWERS.find((p) => p.id === participant.power)?.icon}
-                            </div>
-                          )}
-                          <Badge variant="outline" className="border-green-600 text-green-300">
-                            <Heart className="h-3 w-3 mr-1" />
-                            {participant.lives}
-                          </Badge>
-                          <Badge variant="outline" className="border-blue-600 text-blue-300">
-                            <Coins className="h-3 w-3 mr-1" />
-                            {participant.points}
-                          </Badge>
-                          {participant.cursed && (
-                            <Badge className="bg-purple-700">
-                              <Skull className="h-3 w-3" />
-                            </Badge>
-                          )}
-                          {!participant.isConnected && <Badge className="bg-red-600 text-xs">OFF</Badge>}
-                          {index === currentPlayerIndex && <Badge className="bg-red-600 text-white">TURNO</Badge>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Game Log */}
-                {gameLog.length > 0 && (
-                  <div className="space-y-2">
-                    <h4 className="text-lg font-semibold text-red-300">Registro del juego:</h4>
-                    <div className="bg-black/50 p-3 rounded-lg max-h-32 overflow-y-auto">
-                      {gameLog.slice(-5).map((log, index) => (
-                        <p key={index} className="text-sm text-red-200">
-                          {log}
-                        </p>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Finished Phase */}
-            {gameState === "finished" && (
-              <div className="text-center space-y-6">
-                <div className="bg-red-900/50 p-8 rounded-lg border-2 border-red-600">
-                  <Skull className="h-16 w-16 mx-auto mb-4 text-red-400" />
-                  <h2 className="text-3xl font-bold text-red-400 mb-2">¡JUEGO TERMINADO!</h2>
-
-                  <div className="space-y-4">
-                    <h3 className="text-xl text-green-400">🏆 Clasificación Final:</h3>
-                    {currentRoom.participants
-                      .sort((a, b) => b.points - a.points)
-                      .map((participant, index) => (
-                        <div
-                          key={participant.id}
-                          className="flex items-center justify-between bg-black/30 p-3 rounded-lg"
-                        >
-                          <div className="flex items-center gap-2">
-                            <Badge
-                              className={index === 0 ? "bg-yellow-600" : index === 1 ? "bg-gray-400" : "bg-orange-600"}
-                            >
-                              #{index + 1}
-                            </Badge>
-                            <span className="font-bold text-white">{participant.name}</span>
-                            {participant.power && (
-                              <div className={`p-1 rounded ${POWERS.find((p) => p.id === participant.power)?.color}`}>
-                                {POWERS.find((p) => p.id === participant.power)?.icon}
-                              </div>
-                            )}
-                            {!participant.isConnected && <Badge className="bg-red-600 text-xs">DESCONECTADO</Badge>}
-                          </div>
-                          <Badge className="bg-green-700">
-                            <Coins className="h-3 w-3 mr-1" />
-                            {participant.points} pts
-                          </Badge>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                <div className="flex gap-2">
-                  {playerName === currentRoom.host && (
-                    <Button onClick={startGame} className="flex-1 bg-green-600 hover:bg-green-500">
-                      Nueva Partida
-                    </Button>
-                  )}
-                  <Button onClick={resetGame} className="flex-1 bg-blue-600 hover:bg-blue-500">
-                    Salir de la Sala
-                  </Button>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  )
-}
+                  </Button>\

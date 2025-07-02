@@ -2,32 +2,26 @@
 
 import { useState, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
-import { Wifi, WifiOff, Loader2 } from "lucide-react"
-import { socketManager } from "@/lib/socket"
+import { Wifi, WifiOff, Loader2, AlertTriangle } from "lucide-react"
+import { realtimeClient } from "@/lib/realtime-client"
 
 export function ConnectionStatus() {
-  const [status, setStatus] = useState<"connected" | "disconnected" | "connecting">("disconnected")
-  const [playerCount, setPlayerCount] = useState(0)
+  const [status, setStatus] = useState<"connected" | "disconnected" | "connecting" | "error">("disconnected")
+  const [reconnectAttempts, setReconnectAttempts] = useState(0)
 
   useEffect(() => {
-    const socket = socketManager.getSocket()
-    if (!socket) return
+    const handleStatusChange = (data: { status: string; reconnectAttempts: number }) => {
+      setStatus(data.status as any)
+      setReconnectAttempts(data.reconnectAttempts)
+    }
 
-    const handleConnect = () => setStatus("connected")
-    const handleDisconnect = () => setStatus("disconnected")
-    const handleConnecting = () => setStatus("connecting")
-
-    socket.on("connect", handleConnect)
-    socket.on("disconnect", handleDisconnect)
-    socket.on("connecting", handleConnecting)
+    realtimeClient.on("connection:statusChanged", handleStatusChange)
 
     // Set initial status
-    setStatus(socket.connected ? "connected" : "disconnected")
+    setStatus(realtimeClient.getConnectionStatus())
 
     return () => {
-      socket.off("connect", handleConnect)
-      socket.off("disconnect", handleDisconnect)
-      socket.off("connecting", handleConnecting)
+      realtimeClient.off("connection:statusChanged", handleStatusChange)
     }
   }, [])
 
@@ -42,14 +36,20 @@ export function ConnectionStatus() {
       case "connecting":
         return {
           icon: <Loader2 className="h-3 w-3 animate-spin" />,
-          text: "Conectando...",
+          text: reconnectAttempts > 0 ? `Reconectando... (${reconnectAttempts}/5)` : "Conectando...",
           className: "bg-yellow-600",
+        }
+      case "error":
+        return {
+          icon: <AlertTriangle className="h-3 w-3" />,
+          text: "Error de conexión",
+          className: "bg-red-600",
         }
       default:
         return {
           icon: <WifiOff className="h-3 w-3" />,
           text: "Desconectado",
-          className: "bg-red-600",
+          className: "bg-gray-600",
         }
     }
   }
@@ -58,7 +58,7 @@ export function ConnectionStatus() {
 
   return (
     <div className="fixed top-4 right-4 z-50">
-      <Badge className={`${config.className} text-white flex items-center gap-1`}>
+      <Badge className={`${config.className} text-white flex items-center gap-1 px-3 py-1`}>
         {config.icon}
         {config.text}
       </Badge>
