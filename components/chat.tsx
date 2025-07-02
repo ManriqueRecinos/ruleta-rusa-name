@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { MessageCircle, Send, X } from "lucide-react"
-import { realtimeClient } from "@/lib/realtime-client"
+import { gameClient } from "@/lib/game-client"
 
 interface ChatMessage {
   id: string
@@ -26,10 +26,7 @@ interface ChatProps {
 export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState("")
-  const [isTyping, setIsTyping] = useState(false)
-  const [typingUsers, setTypingUsers] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const typingTimeoutRef = useRef<NodeJS.Timeout>()
 
   useEffect(() => {
     const handleChatMessage = (data: { playerId: number; playerName: string; message: string; timestamp: number }) => {
@@ -43,24 +40,10 @@ export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
       setMessages((prev) => [...prev, chatMessage])
     }
 
-    const handleTypingStatus = (data: { playerId: number; playerName: string; isTyping: boolean }) => {
-      if (data.playerId === currentPlayerId) return
-
-      setTypingUsers((prev) => {
-        if (data.isTyping) {
-          return prev.includes(data.playerName) ? prev : [...prev, data.playerName]
-        } else {
-          return prev.filter((name) => name !== data.playerName)
-        }
-      })
-    }
-
-    realtimeClient.on("chat:messageReceived", handleChatMessage)
-    realtimeClient.on("player:typingStatus", handleTypingStatus)
+    gameClient.on("chat:messageReceived", handleChatMessage)
 
     return () => {
-      realtimeClient.off("chat:messageReceived", handleChatMessage)
-      realtimeClient.off("player:typingStatus", handleTypingStatus)
+      gameClient.off("chat:messageReceived", handleChatMessage)
     }
   }, [currentPlayerId])
 
@@ -75,32 +58,10 @@ export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
   const sendMessage = async () => {
     if (!newMessage.trim()) return
 
-    const success = await realtimeClient.emit("chat:message", { message: newMessage.trim() })
+    const success = await gameClient.emit("chat:message", { message: newMessage.trim() })
     if (success) {
       setNewMessage("")
-      setIsTyping(false)
-      realtimeClient.emit("player:typing", { isTyping: false })
     }
-  }
-
-  const handleInputChange = (value: string) => {
-    setNewMessage(value)
-
-    if (!isTyping && value.trim()) {
-      setIsTyping(true)
-      realtimeClient.emit("player:typing", { isTyping: true })
-    }
-
-    // Clear existing timeout
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current)
-    }
-
-    // Set new timeout to stop typing indicator
-    typingTimeoutRef.current = setTimeout(() => {
-      setIsTyping(false)
-      realtimeClient.emit("player:typing", { isTyping: false })
-    }, 2000)
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -148,19 +109,13 @@ export function Chat({ isOpen, onToggle, currentPlayerId }: ChatProps) {
             </div>
           ))}
 
-          {typingUsers.length > 0 && (
-            <div className="text-xs text-red-400 italic">
-              {typingUsers.join(", ")} {typingUsers.length === 1 ? "está" : "están"} escribiendo...
-            </div>
-          )}
-
           <div ref={messagesEndRef} />
         </div>
 
         <div className="flex gap-2">
           <Input
             value={newMessage}
-            onChange={(e) => handleInputChange(e.target.value)}
+            onChange={(e) => setNewMessage(e.target.value)}
             onKeyPress={handleKeyPress}
             placeholder="Escribe un mensaje..."
             className="bg-red-950/50 border-red-700 text-white placeholder:text-red-300"

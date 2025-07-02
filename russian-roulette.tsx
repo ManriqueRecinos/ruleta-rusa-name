@@ -6,22 +6,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import {
-  Users,
-  Target,
-  Skull,
-  Shield,
-  Eye,
-  Crosshair,
-  Zap,
-  Heart,
-  Coins,
-  Dice1,
-  Copy,
-  Wifi,
-  AlertTriangle,
-} from "lucide-react"
-import { realtimeClient } from "@/lib/realtime-client"
+import { Users, Target, Skull, Shield, Eye, Crosshair, Heart, Coins, Copy, Wifi, AlertTriangle } from "lucide-react"
+import { gameClient } from "@/lib/game-client"
 import { authManager, type PlayerSession } from "@/lib/auth"
 import { Chat } from "@/components/chat"
 import { ConnectionStatus } from "@/components/connection-status"
@@ -107,44 +93,6 @@ const POWERS: Power[] = [
   },
 ]
 
-const EVENTS: GameEvent[] = [
-  {
-    id: "double_turn",
-    name: "Turno Doble",
-    description: "Juegas dos veces seguidas",
-    icon: <Dice1 className="h-4 w-4" />,
-    probability: 0.15,
-  },
-  {
-    id: "skip_turn",
-    name: "Saltar Turno",
-    description: "El siguiente jugador pierde su turno",
-    icon: <Zap className="h-4 w-4" />,
-    probability: 0.1,
-  },
-  {
-    id: "extra_bullet",
-    name: "Bala Extra",
-    description: "Se agrega una bala al tambor",
-    icon: <Target className="h-4 w-4" />,
-    probability: 0.08,
-  },
-  {
-    id: "heal",
-    name: "Vida Extra",
-    description: "Ganas una vida adicional",
-    icon: <Heart className="h-4 w-4" />,
-    probability: 0.12,
-  },
-  {
-    id: "curse",
-    name: "Maldición",
-    description: "Próximo disparo tiene más probabilidad de bala",
-    icon: <Skull className="h-4 w-4" />,
-    probability: 0.1,
-  },
-]
-
 export default function Component() {
   const [gameMode, setGameMode] = useState<"menu" | "create" | "join" | "game">("menu")
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null)
@@ -158,21 +106,8 @@ export default function Component() {
   const [connectionError, setConnectionError] = useState<string | null>(null)
 
   // Game states
-  const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0)
-  const [bulletsLeft, setBulletsLeft] = useState(10)
   const [gameState, setGameState] = useState<GameState>("lobby")
-  const [eliminatedPlayer, setEliminatedPlayer] = useState<string | null>(null)
-  const [lastShot, setLastShot] = useState<"safe" | "bullet" | null>(null)
-  const [currentPowerSelection, setCurrentPowerSelection] = useState(0)
-  const [peekResult, setPeekResult] = useState<boolean | null>(null)
-  const [targetingMode, setTargetingMode] = useState(false)
   const [gameLog, setGameLog] = useState<string[]>([])
-  const [currentEvent, setCurrentEvent] = useState<GameEvent | null>(null)
-  const [bulletTargetMode, setBulletTargetMode] = useState(false)
-  const [round, setRound] = useState(1)
-  const [maxRounds] = useState(3)
-  const [skipNextTurn, setSkipNextTurn] = useState(false)
-  const [doubleTurn, setDoubleTurn] = useState(false)
 
   // Initialize session and connection
   useEffect(() => {
@@ -189,9 +124,9 @@ export default function Component() {
   const initializeConnection = async () => {
     try {
       setConnectionError(null)
-      const connected = await realtimeClient.connect()
+      const connected = await gameClient.connect()
       setIsConnected(connected)
-      
+
       if (!connected) {
         setConnectionError("No se pudo establecer conexión con el servidor")
       }
@@ -202,14 +137,14 @@ export default function Component() {
     }
   }
 
-  // Socket event handlers
+  // Event handlers
   useEffect(() => {
     const handleConnectionStatus = (data: { status: string }) => {
-      setIsConnected(data.status === 'connected')
-      
-      if (data.status === 'error') {
+      setIsConnected(data.status === "connected")
+
+      if (data.status === "error") {
         setConnectionError("Error de conexión - Reintentando...")
-      } else if (data.status === 'connected') {
+      } else if (data.status === "connected") {
         setConnectionError(null)
       }
     }
@@ -219,7 +154,7 @@ export default function Component() {
       setGameMode("game")
       setGameState(data.room.gameState)
       authManager.updateSession({ roomId: data.roomId })
-      realtimeClient.setRoomId(data.roomId)
+      gameClient.setRoomId(data.roomId)
       addToLog(`Sala "${data.room.name}" creada`)
     }
 
@@ -228,30 +163,18 @@ export default function Component() {
       setGameMode("game")
       setGameState(data.room.gameState)
       authManager.updateSession({ roomId: data.room.id })
-      realtimeClient.setRoomId(data.room.id)
+      gameClient.setRoomId(data.room.id)
       addToLog(`Te uniste a la sala "${data.room.name}"`)
     }
 
     const handleRoomUpdated = (data: { room: Room }) => {
       setCurrentRoom(data.room)
       setGameState(data.room.gameState)
-      setCurrentPlayerIndex(data.room.currentPlayerIndex)
-      setBulletsLeft(data.room.bulletsLeft)
-      setRound(data.room.round)
-    }
-
-    const handleRoomError = (data: { message: string }) => {
-      console.error("Room error:", data.message)
-      addToLog(`Error: ${data.message}`)
-      setConnectionError(data.message)
     }
 
     const handleGameStateChanged = (data: { gameState: GameState; room: Room }) => {
       setGameState(data.gameState)
       setCurrentRoom(data.room)
-      setCurrentPlayerIndex(data.room.currentPlayerIndex)
-      setBulletsLeft(data.room.bulletsLeft)
-      setRound(data.room.round)
     }
 
     const handlePlayerAction = (data: { playerId: number; action: string; message: string }) => {
@@ -269,34 +192,20 @@ export default function Component() {
       }
     }
 
-    const handlePlayerDisconnect = (data: { playerId: number; playerName: string }) => {
-      addToLog(`${data.playerName} se desconectó`)
-    }
-
-    const handlePlayerReconnect = (data: { playerId: number; playerName: string }) => {
-      addToLog(`${data.playerName} se reconectó`)
-    }
-
-    realtimeClient.on('connection:statusChanged', handleConnectionStatus)
-    realtimeClient.on('room:created', handleRoomCreated)
-    realtimeClient.on('room:joined', handleRoomJoined)
-    realtimeClient.on('room:updated', handleRoomUpdated)
-    realtimeClient.on('room:error', handleRoomError)
-    realtimeClient.on('game:stateChanged', handleGameStateChanged)
-    realtimeClient.on('game:playerAction', handlePlayerAction)
-    realtimeClient.on('player:disconnect', handlePlayerDisconnect)
-    realtimeClient.on('player:reconnect', handlePlayerReconnect)
+    gameClient.on("connection:statusChanged", handleConnectionStatus)
+    gameClient.on("room:created", handleRoomCreated)
+    gameClient.on("room:joined", handleRoomJoined)
+    gameClient.on("room:updated", handleRoomUpdated)
+    gameClient.on("game:stateChanged", handleGameStateChanged)
+    gameClient.on("game:playerAction", handlePlayerAction)
 
     return () => {
-      realtimeClient.off('connection:statusChanged', handleConnectionStatus)
-      realtimeClient.off('room:created', handleRoomCreated)
-      realtimeClient.off('room:joined', handleRoomJoined)
-      realtimeClient.off('room:updated', handleRoomUpdated)
-      realtimeClient.off('room:error', handleRoomError)
-      realtimeClient.off('game:stateChanged', handleGameStateChanged)
-      realtimeClient.off('game:playerAction', handlePlayerAction)
-      realtimeClient.off('player:disconnect', handlePlayerDisconnect)
-      realtimeClient.off('player:reconnect', handlePlayerReconnect)
+      gameClient.off("connection:statusChanged", handleConnectionStatus)
+      gameClient.off("room:created", handleRoomCreated)
+      gameClient.off("room:joined", handleRoomJoined)
+      gameClient.off("room:updated", handleRoomUpdated)
+      gameClient.off("game:stateChanged", handleGameStateChanged)
+      gameClient.off("game:playerAction", handlePlayerAction)
     }
   }, [currentRoom])
 
@@ -313,7 +222,7 @@ export default function Component() {
       setSession(currentSession)
     }
 
-    const success = await realtimeClient.emit("room:create", {
+    const success = await gameClient.emit("room:create", {
       roomName: roomName.trim(),
       playerName: playerName.trim(),
     })
@@ -332,7 +241,7 @@ export default function Component() {
       setSession(currentSession)
     }
 
-    const success = await realtimeClient.emit("room:join", {
+    const success = await gameClient.emit("room:join", {
       roomCode: roomCode.trim().toUpperCase(),
       playerName: playerName.trim(),
     })
@@ -343,12 +252,12 @@ export default function Component() {
   }
 
   const leaveRoom = async () => {
-    await realtimeClient.emit("room:leave")
+    await gameClient.emit("room:leave")
     setCurrentRoom(null)
     setGameMode("menu")
     setGameState("lobby")
     authManager.updateSession({ roomId: undefined })
-    realtimeClient.setRoomId(null)
+    gameClient.setRoomId(null)
     resetGameState()
   }
 
@@ -360,52 +269,36 @@ export default function Component() {
   }
 
   const startGame = async () => {
-    const success = await realtimeClient.emit("game:start")
+    const success = await gameClient.emit("game:start")
     if (!success) {
       setConnectionError("Error al iniciar el juego")
     }
   }
 
   const selectPower = async (power: PowerType) => {
-    const success = await realtimeClient.emit("game:selectPower", { power })
+    const success = await gameClient.emit("game:selectPower", { power })
     if (!success) {
       setConnectionError("Error al seleccionar poder")
     }
   }
 
   const shoot = async () => {
-    const success = await realtimeClient.emit("game:shoot")
+    const success = await gameClient.emit("game:shoot")
     if (!success) {
       setConnectionError("Error al disparar")
     }
   }
 
   const shootTarget = async (targetId: number) => {
-    const success = await realtimeClient.emit("game:targetShoot", { targetId })
+    const success = await gameClient.emit("game:targetShoot", { targetId })
     if (!success) {
       setConnectionError("Error al disparar al objetivo")
     }
   }
 
   const resetGameState = () => {
-    setCurrentPlayerIndex(0)
-    setBulletsLeft(10)
-    setRound(1)
     setGameLog([])
-    setEliminatedPlayer(null)
-    setLastShot(null)
-    setCurrentPowerSelection(0)
-    setPeekResult(null)
-    setTargetingMode(false)
-    setBulletTargetMode(false)
-    setCurrentEvent(null)
-    setSkipNextTurn(false)
-    setDoubleTurn(false)
     setPlayerActions([])
-  }
-
-  const resetGame = () => {
-    leaveRoom()
   }
 
   const retryConnection = () => {
@@ -427,7 +320,7 @@ export default function Component() {
                 Reintentar Conexión
               </Button>
               <p className="text-xs text-red-400">
-                Nota: Este juego requiere conexión a internet para funcionar en modo multijugador
+                El juego funciona completamente en tu navegador sin necesidad de servidores externos
               </p>
             </div>
           </CardContent>
@@ -443,8 +336,8 @@ export default function Component() {
         <Card className="border-red-800 bg-black/80 text-white">
           <CardContent className="p-8 text-center">
             <Wifi className="h-16 w-16 mx-auto mb-4 text-red-400 animate-pulse" />
-            <h2 className="text-2xl font-bold text-red-400 mb-2">Conectando al servidor...</h2>
-            <p className="text-red-300">Por favor espera mientras establecemos la conexión</p>
+            <h2 className="text-2xl font-bold text-red-400 mb-2">Conectando...</h2>
+            <p className="text-red-300">Inicializando el juego</p>
           </CardContent>
         </Card>
       </div>
@@ -580,7 +473,7 @@ export default function Component() {
   if (!currentRoom) return null
 
   const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-  const currentPlayer = alivePlayers[currentPlayerIndex]
+  const currentPlayer = alivePlayers[currentRoom.currentPlayerIndex]
   const myParticipant = currentRoom.participants.find((p) => p.name === playerName)
 
   return (
@@ -602,9 +495,6 @@ export default function Component() {
               <Button onClick={copyRoomCode} size="sm" variant="ghost" className="text-red-300 hover:text-white">
                 <Copy className="h-4 w-4" />
               </Button>
-              <span>
-                Ronda: {round}/{maxRounds}
-              </span>
               <Button
                 onClick={leaveRoom}
                 size="sm"
@@ -623,17 +513,6 @@ export default function Component() {
                 <Button onClick={retryConnection} size="sm" className="mt-2 bg-red-600 hover:bg-red-500">
                   Reintentar
                 </Button>
-              </div>
-            )}
-
-            {/* Current Event Display */}
-            {currentEvent && (
-              <div className="bg-yellow-900/50 border border-yellow-600 p-4 rounded-lg text-center">
-                <div className="flex items-center justify-center gap-2 mb-2">
-                  {currentEvent.icon}
-                  <h3 className="font-bold text-yellow-300">{currentEvent.name}</h3>
-                </div>
-                <p className="text-yellow-200">{currentEvent.description}</p>
               </div>
             )}
 
@@ -684,4 +563,223 @@ export default function Component() {
                     className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3"
                   >
                     {currentRoom.participants.length < 2 ? "Necesitas al menos 2 jugadores" : "Comenzar Juego"}
-                  </Button>\
+                  </Button>
+                )}
+
+                {playerName !== currentRoom.host && (
+                  <div className="text-center text-red-300">Esperando que el host inicie el juego...</div>
+                )}
+              </div>
+            )}
+
+            {/* Powers Selection Phase */}
+            {gameState === "powers" && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold text-red-300 mb-2">Selección de Poderes</h2>
+                  <p className="text-red-400">Selecciona tu poder para esta partida</p>
+                </div>
+
+                {!myParticipant?.power ? (
+                  <div className="grid gap-4">
+                    {POWERS.map((power) => (
+                      <Card
+                        key={power.id}
+                        className="cursor-pointer transition-all border-2 border-red-800 bg-red-950/30 hover:border-red-600"
+                        onClick={() => selectPower(power.id)}
+                      >
+                        <CardContent className="p-4">
+                          <div className="flex items-center gap-3">
+                            <div className={`p-2 rounded-lg ${power.color}`}>{power.icon}</div>
+                            <div className="flex-1">
+                              <h3 className="font-bold text-white">{power.name}</h3>
+                              <p className="text-sm text-red-300">{power.description}</p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center">
+                    <div className="bg-green-900/50 border border-green-600 p-4 rounded-lg">
+                      <p className="text-green-300">
+                        Has seleccionado: <strong>{POWERS.find((p) => p.id === myParticipant.power)?.name}</strong>
+                      </p>
+                      <p className="text-sm text-green-400 mt-1">Esperando que otros jugadores seleccionen...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Playing Phase */}
+            {gameState === "playing" && (
+              <div className="space-y-6">
+                <div className="text-center space-y-2">
+                  <div className="flex items-center justify-center gap-4 flex-wrap">
+                    <Badge className="bg-red-700 text-white px-4 py-2 text-lg">Balas: {currentRoom.bulletsLeft}</Badge>
+                    <Badge className="bg-green-700 text-white px-4 py-2 text-lg">Vivos: {alivePlayers.length}</Badge>
+                  </div>
+                </div>
+
+                <div className="text-center space-y-4">
+                  <h3 className="text-2xl font-bold text-red-300">Turno de:</h3>
+                  <div className="bg-red-950/50 p-6 rounded-lg border-2 border-red-600">
+                    <p className="text-3xl font-bold text-white mb-2">{currentPlayer?.name}</p>
+                    <div className="flex items-center justify-center gap-4 text-sm">
+                      {currentPlayer?.power && (
+                        <div className="flex items-center gap-2">
+                          <div className={`p-1 rounded ${POWERS.find((p) => p.id === currentPlayer.power)?.color}`}>
+                            {POWERS.find((p) => p.id === currentPlayer.power)?.icon}
+                          </div>
+                          <span className={currentPlayer.powerUsed ? "text-gray-400 line-through" : "text-white"}>
+                            {POWERS.find((p) => p.id === currentPlayer.power)?.name}
+                          </span>
+                        </div>
+                      )}
+                      <Badge className="bg-green-700">
+                        <Heart className="h-3 w-3 mr-1" />
+                        {currentPlayer?.lives}
+                      </Badge>
+                      <Badge className="bg-blue-700">
+                        <Coins className="h-3 w-3 mr-1" />
+                        {currentPlayer?.points}
+                      </Badge>
+                    </div>
+                  </div>
+
+                  {currentPlayer?.name === playerName && currentPlayer?.isConnected && (
+                    <Button
+                      onClick={shoot}
+                      className="bg-red-600 hover:bg-red-500 text-white font-bold py-4 px-8 text-xl"
+                    >
+                      <Target className="h-6 w-6 mr-2" />
+                      DISPARAR
+                    </Button>
+                  )}
+
+                  {currentPlayer?.name !== playerName && (
+                    <div className="text-center text-red-300">Esperando que {currentPlayer?.name} tome su turno...</div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="text-lg font-semibold text-red-300">Jugadores:</h4>
+                  <div className="grid gap-2">
+                    {alivePlayers.map((participant, index) => (
+                      <div
+                        key={participant.id}
+                        className={`flex items-center gap-2 p-3 rounded-lg border ${
+                          index === currentRoom.currentPlayerIndex
+                            ? "bg-red-700/50 border-red-500"
+                            : "bg-red-950/30 border-red-800"
+                        }`}
+                      >
+                        <Badge variant="outline" className="border-red-600 text-red-300">
+                          #{index + 1}
+                        </Badge>
+                        <span
+                          className={`${index === currentRoom.currentPlayerIndex ? "font-bold text-white" : "text-red-200"} ${!participant.isConnected ? "opacity-50" : ""}`}
+                        >
+                          {participant.name}
+                        </span>
+                        <div className="flex items-center gap-1 ml-auto">
+                          {participant.power && (
+                            <div
+                              className={`p-1 rounded ${POWERS.find((p) => p.id === participant.power)?.color} ${participant.powerUsed ? "opacity-50" : ""}`}
+                            >
+                              {POWERS.find((p) => p.id === participant.power)?.icon}
+                            </div>
+                          )}
+                          <Badge variant="outline" className="border-green-600 text-green-300">
+                            <Heart className="h-3 w-3 mr-1" />
+                            {participant.lives}
+                          </Badge>
+                          <Badge variant="outline" className="border-blue-600 text-blue-300">
+                            <Coins className="h-3 w-3 mr-1" />
+                            {participant.points}
+                          </Badge>
+                          {!participant.isConnected && <Badge className="bg-red-600 text-xs">OFF</Badge>}
+                          {index === currentRoom.currentPlayerIndex && (
+                            <Badge className="bg-red-600 text-white">TURNO</Badge>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Game Log */}
+                {gameLog.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="text-lg font-semibold text-red-300">Registro del juego:</h4>
+                    <div className="bg-black/50 p-3 rounded-lg max-h-32 overflow-y-auto">
+                      {gameLog.slice(-5).map((log, index) => (
+                        <p key={index} className="text-sm text-red-200">
+                          {log}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Finished Phase */}
+            {gameState === "finished" && (
+              <div className="text-center space-y-6">
+                <div className="bg-red-900/50 p-8 rounded-lg border-2 border-red-600">
+                  <Skull className="h-16 w-16 mx-auto mb-4 text-red-400" />
+                  <h2 className="text-3xl font-bold text-red-400 mb-2">¡JUEGO TERMINADO!</h2>
+
+                  <div className="space-y-4">
+                    <h3 className="text-xl text-green-400">🏆 Clasificación Final:</h3>
+                    {currentRoom.participants
+                      .sort((a, b) => b.points - a.points)
+                      .map((participant, index) => (
+                        <div
+                          key={participant.id}
+                          className="flex items-center justify-between bg-black/30 p-3 rounded-lg"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Badge
+                              className={index === 0 ? "bg-yellow-600" : index === 1 ? "bg-gray-400" : "bg-orange-600"}
+                            >
+                              #{index + 1}
+                            </Badge>
+                            <span className="font-bold text-white">{participant.name}</span>
+                            {participant.power && (
+                              <div className={`p-1 rounded ${POWERS.find((p) => p.id === participant.power)?.color}`}>
+                                {POWERS.find((p) => p.id === participant.power)?.icon}
+                              </div>
+                            )}
+                            {!participant.isConnected && <Badge className="bg-red-600 text-xs">DESCONECTADO</Badge>}
+                          </div>
+                          <Badge className="bg-green-700">
+                            <Coins className="h-3 w-3 mr-1" />
+                            {participant.points} pts
+                          </Badge>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  {playerName === currentRoom.host && (
+                    <Button onClick={startGame} className="flex-1 bg-green-600 hover:bg-green-500">
+                      Nueva Partida
+                    </Button>
+                  )}
+                  <Button onClick={leaveRoom} className="flex-1 bg-blue-600 hover:bg-blue-500">
+                    Salir de la Sala
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}

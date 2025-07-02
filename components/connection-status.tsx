@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Wifi, WifiOff, Loader2, AlertTriangle } from "lucide-react"
-import { realtimeClient } from "@/lib/realtime-client"
+import { gameClient } from "@/lib/game-client"
 
 export function ConnectionStatus() {
   const [status, setStatus] = useState<"connected" | "disconnected" | "connecting" | "error">("disconnected")
@@ -15,13 +15,13 @@ export function ConnectionStatus() {
       setReconnectAttempts(data.reconnectAttempts)
     }
 
-    realtimeClient.on("connection:statusChanged", handleStatusChange)
+    gameClient.on("connection:statusChanged", handleStatusChange)
 
     // Set initial status
-    setStatus(realtimeClient.getConnectionStatus())
+    setStatus(gameClient.getConnectionStatus())
 
     return () => {
-      realtimeClient.off("connection:statusChanged", handleStatusChange)
+      gameClient.off("connection:statusChanged", handleStatusChange)
     }
   }, [])
 
