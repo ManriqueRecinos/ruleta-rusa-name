@@ -1,17 +1,22 @@
 "use client"
 
 import type React from "react"
-
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { Users, Target, Skull, Shield, Eye, Crosshair, Zap, Heart, Coins, Dice1, Copy } from "lucide-react"
+import { Users, Target, Skull, Shield, Eye, Crosshair, Zap, Heart, Coins, Dice1, Copy, Wifi } from "lucide-react"
+import { socketManager } from "@/lib/socket"
+import { authManager, type PlayerSession } from "@/lib/auth"
+import { Chat } from "@/components/chat"
+import { ConnectionStatus } from "@/components/connection-status"
+import { PlayerActions } from "@/components/player-actions"
 
 type PowerType = "block" | "peek" | "target" | null
 type EventType = "double_turn" | "skip_turn" | "extra_bullet" | "heal" | "curse" | null
+type GameState = "lobby" | "powers" | "playing" | "finished"
 
 interface Power {
   id: PowerType
@@ -39,6 +44,8 @@ interface Participant {
   lives: number
   cursed: boolean
   protected: boolean
+  isConnected: boolean
+  lastSeen: number
 }
 
 interface Room {
@@ -46,11 +53,20 @@ interface Room {
   name: string
   host: string
   participants: Participant[]
-  gameState: "lobby" | "powers" | "playing" | "finished"
+  gameState: GameState
   currentPlayerIndex: number
   bulletsLeft: number
   round: number
   maxRounds: number
+  createdAt: number
+}
+
+interface PlayerAction {
+  playerId: number
+  playerName: string
+  action: string
+  message: string
+  timestamp: number
 }
 
 const POWERS: Power[] = [
@@ -121,11 +137,15 @@ export default function Component() {
   const [playerName, setPlayerName] = useState("")
   const [roomCode, setRoomCode] = useState("")
   const [roomName, setRoomName] = useState("")
+  const [session, setSession] = useState<PlayerSession | null>(null)
+  const [isConnected, setIsConnected] = useState(false)
+  const [isChatOpen, setIsChatOpen] = useState(false)
+  const [playerActions, setPlayerActions] = useState<PlayerAction[]>([])
 
   // Game states
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0)
   const [bulletsLeft, setBulletsLeft] = useState(10)
-  const [gameState, setGameState] = useState<"lobby" | "powers" | "playing" | "finished">("lobby")
+  const [gameState, setGameState] = useState<GameState>("lobby")
   const [eliminatedPlayer, setEliminatedPlayer] = useState<string | null>(null)
   const [lastShot, setLastShot] = useState<"safe" | "bullet" | null>(null)
   const [currentPowerSelection, setCurrentPowerSelection] = useState(0)
@@ -139,136 +159,164 @@ export default function Component() {
   const [skipNextTurn, setSkipNextTurn] = useState(false)
   const [doubleTurn, setDoubleTurn] = useState(false)
 
-  // Load room from localStorage on mount
+  // Initialize socket connection and session
   useEffect(() => {
-    const savedRoom = localStorage.getItem("currentRoom")
-    if (savedRoom) {
-      const room = JSON.parse(savedRoom)
-      setCurrentRoom(room)
-      setGameMode("game")
-      setGameState(room.gameState)
-      setCurrentPlayerIndex(room.currentPlayerIndex)
-      setBulletsLeft(room.bulletsLeft)
-      setRound(room.round)
+    const existingSession = authManager.getSession()
+    if (existingSession) {
+      setSession(existingSession)
+      setPlayerName(existingSession.playerName)
+    }
+
+    const socket = socketManager.connect()
+
+    const handleConnect = () => {
+      setIsConnected(true)
+      console.log("Connected to server")
+    }
+
+    const handleDisconnect = () => {
+      setIsConnected(false)
+      console.log("Disconnected from server")
+    }
+
+    socket.on("connect", handleConnect)
+    socket.on("disconnect", handleDisconnect)
+
+    setIsConnected(socket.connected)
+
+    return () => {
+      socket.off("connect", handleConnect)
+      socket.off("disconnect", handleDisconnect)
     }
   }, [])
 
-  // Save room to localStorage whenever it changes
+  // Socket event handlers
   useEffect(() => {
-    if (currentRoom) {
-      const roomToSave = {
-        ...currentRoom,
-        gameState,
-        currentPlayerIndex,
-        bulletsLeft,
-        round,
-      }
-      localStorage.setItem("currentRoom", JSON.stringify(roomToSave))
-    }
-  }, [currentRoom, gameState, currentPlayerIndex, bulletsLeft, round])
+    const socket = socketManager.getSocket()
+    if (!socket) return
 
-  const generateRoomCode = () => {
-    return Math.random().toString(36).substring(2, 8).toUpperCase()
-  }
+    const handleRoomCreated = (data: { roomId: string; room: Room }) => {
+      setCurrentRoom(data.room)
+      setGameMode("game")
+      setGameState(data.room.gameState)
+      authManager.updateSession({ roomId: data.roomId })
+      addToLog(`Sala "${data.room.name}" creada`)
+    }
+
+    const handleRoomJoined = (data: { room: Room }) => {
+      setCurrentRoom(data.room)
+      setGameMode("game")
+      setGameState(data.room.gameState)
+      authManager.updateSession({ roomId: data.room.id })
+      addToLog(`Te uniste a la sala "${data.room.name}"`)
+    }
+
+    const handleRoomUpdated = (data: { room: Room }) => {
+      setCurrentRoom(data.room)
+      setGameState(data.room.gameState)
+      setCurrentPlayerIndex(data.room.currentPlayerIndex)
+      setBulletsLeft(data.room.bulletsLeft)
+      setRound(data.room.round)
+    }
+
+    const handleRoomError = (data: { message: string }) => {
+      console.error("Room error:", data.message)
+      addToLog(`Error: ${data.message}`)
+    }
+
+    const handleGameStateChanged = (data: { gameState: GameState; room: Room }) => {
+      setGameState(data.gameState)
+      setCurrentRoom(data.room)
+      setCurrentPlayerIndex(data.room.currentPlayerIndex)
+      setBulletsLeft(data.room.bulletsLeft)
+      setRound(data.room.round)
+    }
+
+    const handlePlayerAction = (data: { playerId: number; action: string; message: string }) => {
+      const participant = currentRoom?.participants.find((p) => p.id === data.playerId)
+      if (participant) {
+        const action: PlayerAction = {
+          playerId: data.playerId,
+          playerName: participant.name,
+          action: data.action,
+          message: data.message,
+          timestamp: Date.now(),
+        }
+        setPlayerActions((prev) => [...prev, action])
+        addToLog(data.message)
+      }
+    }
+
+    const handlePlayerDisconnect = (data: { playerId: number; playerName: string }) => {
+      addToLog(`${data.playerName} se desconectó`)
+    }
+
+    const handlePlayerReconnect = (data: { playerId: number; playerName: string }) => {
+      addToLog(`${data.playerName} se reconectó`)
+    }
+
+    socket.on("room:created", handleRoomCreated)
+    socket.on("room:joined", handleRoomJoined)
+    socket.on("room:updated", handleRoomUpdated)
+    socket.on("room:error", handleRoomError)
+    socket.on("game:stateChanged", handleGameStateChanged)
+    socket.on("game:playerAction", handlePlayerAction)
+    socket.on("player:disconnect", handlePlayerDisconnect)
+    socket.on("player:reconnect", handlePlayerReconnect)
+
+    return () => {
+      socket.off("room:created", handleRoomCreated)
+      socket.off("room:joined", handleRoomJoined)
+      socket.off("room:updated", handleRoomUpdated)
+      socket.off("room:error", handleRoomError)
+      socket.off("game:stateChanged", handleGameStateChanged)
+      socket.off("game:playerAction", handlePlayerAction)
+      socket.off("player:disconnect", handlePlayerDisconnect)
+      socket.off("player:reconnect", handlePlayerReconnect)
+    }
+  }, [currentRoom])
+
+  const addToLog = useCallback((message: string) => {
+    setGameLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`])
+  }, [])
 
   const createRoom = () => {
     if (!playerName.trim() || !roomName.trim()) return
 
-    const newRoom: Room = {
-      id: generateRoomCode(),
-      name: roomName,
-      host: playerName,
-      participants: [
-        {
-          id: Date.now(),
-          name: playerName,
-          isAlive: true,
-          power: null,
-          powerUsed: false,
-          points: 0,
-          lives: 1,
-          cursed: false,
-          protected: false,
-        },
-      ],
-      gameState: "lobby",
-      currentPlayerIndex: 0,
-      bulletsLeft: 10,
-      round: 1,
-      maxRounds: 3,
+    let currentSession = session
+    if (!currentSession) {
+      currentSession = authManager.createSession(playerName)
+      setSession(currentSession)
     }
 
-    setCurrentRoom(newRoom)
-    setGameMode("game")
-    setGameState("lobby")
-    addToLog(`Sala "${roomName}" creada por ${playerName}`)
+    socketManager.emit("room:create", {
+      roomName: roomName.trim(),
+      playerName: playerName.trim(),
+    })
   }
 
   const joinRoom = () => {
     if (!playerName.trim() || !roomCode.trim()) return
 
-    // Simulate joining a room (in real implementation, this would fetch from server)
-    const existingRoom = localStorage.getItem(`room_${roomCode}`)
-    if (existingRoom) {
-      const room = JSON.parse(existingRoom)
-      const newParticipant: Participant = {
-        id: Date.now(),
-        name: playerName,
-        isAlive: true,
-        power: null,
-        powerUsed: false,
-        points: 0,
-        lives: 1,
-        cursed: false,
-        protected: false,
-      }
-
-      room.participants.push(newParticipant)
-      setCurrentRoom(room)
-      setGameMode("game")
-      setGameState(room.gameState)
-      addToLog(`${playerName} se unió a la sala`)
-    } else {
-      // Create a mock room for demo purposes
-      const mockRoom: Room = {
-        id: roomCode,
-        name: "Sala Demo",
-        host: "Host",
-        participants: [
-          {
-            id: 1,
-            name: "Host",
-            isAlive: true,
-            power: null,
-            powerUsed: false,
-            points: 0,
-            lives: 1,
-            cursed: false,
-            protected: false,
-          },
-          {
-            id: Date.now(),
-            name: playerName,
-            isAlive: true,
-            power: null,
-            powerUsed: false,
-            points: 0,
-            lives: 1,
-            cursed: false,
-            protected: false,
-          },
-        ],
-        gameState: "lobby",
-        currentPlayerIndex: 0,
-        bulletsLeft: 10,
-        round: 1,
-        maxRounds: 3,
-      }
-      setCurrentRoom(mockRoom)
-      setGameMode("game")
-      setGameState("lobby")
-      addToLog(`${playerName} se unió a la sala demo`)
+    let currentSession = session
+    if (!currentSession) {
+      currentSession = authManager.createSession(playerName)
+      setSession(currentSession)
     }
+
+    socketManager.emit("room:join", {
+      roomCode: roomCode.trim().toUpperCase(),
+      playerName: playerName.trim(),
+    })
+  }
+
+  const leaveRoom = () => {
+    socketManager.emit("room:leave")
+    setCurrentRoom(null)
+    setGameMode("menu")
+    setGameState("lobby")
+    authManager.updateSession({ roomId: undefined })
+    resetGameState()
   }
 
   const copyRoomCode = () => {
@@ -278,271 +326,23 @@ export default function Component() {
     }
   }
 
-  const addToLog = (message: string) => {
-    setGameLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`])
-  }
-
-  const triggerRandomEvent = () => {
-    const random = Math.random()
-    let cumulativeProbability = 0
-
-    for (const event of EVENTS) {
-      cumulativeProbability += event.probability
-      if (random < cumulativeProbability) {
-        setCurrentEvent(event)
-        executeEvent(event)
-        return
-      }
-    }
-  }
-
-  const executeEvent = (event: GameEvent) => {
-    if (!currentRoom) return
-
-    const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-    const currentPlayer = alivePlayers[currentPlayerIndex]
-
-    switch (event.id) {
-      case "double_turn":
-        setDoubleTurn(true)
-        addToLog(`🎲 ${currentPlayer.name} obtuvo Turno Doble!`)
-        break
-      case "skip_turn":
-        setSkipNextTurn(true)
-        addToLog(`⚡ El siguiente jugador perderá su turno!`)
-        break
-      case "extra_bullet":
-        setBulletsLeft((prev) => prev + 1)
-        addToLog(`🎯 Se agregó una bala extra al tambor!`)
-        break
-      case "heal":
-        setCurrentRoom((prev) =>
-          prev
-            ? {
-                ...prev,
-                participants: prev.participants.map((p) =>
-                  p.id === currentPlayer.id ? { ...p, lives: p.lives + 1 } : p,
-                ),
-              }
-            : null,
-        )
-        addToLog(`❤️ ${currentPlayer.name} ganó una vida extra!`)
-        break
-      case "curse":
-        setCurrentRoom((prev) =>
-          prev
-            ? {
-                ...prev,
-                participants: prev.participants.map((p) => (p.id === currentPlayer.id ? { ...p, cursed: true } : p)),
-              }
-            : null,
-        )
-        addToLog(`💀 ${currentPlayer.name} fue maldecido!`)
-        break
-    }
-
-    setTimeout(() => setCurrentEvent(null), 3000)
-  }
-
   const startGame = () => {
-    if (currentRoom && currentRoom.participants.length >= 2) {
-      setGameState("powers")
-      setCurrentPowerSelection(0)
-      addToLog("¡Comenzando selección de poderes!")
-    }
+    socketManager.emit("game:start")
   }
 
-  const selectPower = (participantId: number, power: PowerType) => {
-    if (!currentRoom) return
-
-    setCurrentRoom((prev) =>
-      prev
-        ? {
-            ...prev,
-            participants: prev.participants.map((p) => (p.id === participantId ? { ...p, power } : p)),
-          }
-        : null,
-    )
-  }
-
-  const nextPowerSelection = () => {
-    if (!currentRoom) return
-
-    if (currentPowerSelection < currentRoom.participants.length - 1) {
-      setCurrentPowerSelection(currentPowerSelection + 1)
-    } else {
-      setGameState("playing")
-      setCurrentPlayerIndex(0)
-      addToLog("¡Que comience la ruleta rusa!")
-    }
+  const selectPower = (power: PowerType) => {
+    socketManager.emit("game:selectPower", { power })
   }
 
   const shoot = () => {
-    if (!currentRoom || bulletsLeft === 0 || gameState !== "playing") return
-
-    const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-    if (alivePlayers.length <= 1) return
-
-    const currentPlayer = alivePlayers[currentPlayerIndex]
-
-    // Random event chance
-    if (Math.random() < 0.2) {
-      triggerRandomEvent()
-    }
-
-    // Calculate bullet probability (higher if cursed)
-    const totalShotsRemaining = bulletsLeft + (alivePlayers.length - 1)
-    let bulletProbability = bulletsLeft / totalShotsRemaining
-    if (currentPlayer.cursed) {
-      bulletProbability *= 1.5 // 50% more likely to get bullet if cursed
-    }
-
-    const isBullet = Math.random() < bulletProbability
-
-    if (isBullet) {
-      setBulletTargetMode(true)
-      addToLog(`💥 ${currentPlayer.name} obtuvo una BALA! Puede elegir a quién disparar...`)
-    } else {
-      setLastShot("safe")
-      addToLog(`🍀 ${currentPlayer.name} - disparo seguro`)
-      nextTurn()
-    }
+    socketManager.emit("game:shoot")
   }
 
   const shootTarget = (targetId: number) => {
-    if (!currentRoom) return
-
-    const targetPlayer = currentRoom.participants.find((p) => p.id === targetId)
-    const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-    const currentPlayer = alivePlayers[currentPlayerIndex]
-
-    if (!targetPlayer || !currentPlayer) return
-
-    // Check if target has protection
-    if (targetPlayer.power === "block" && !targetPlayer.powerUsed) {
-      setCurrentRoom((prev) =>
-        prev
-          ? {
-              ...prev,
-              participants: prev.participants.map((p) => (p.id === targetPlayer.id ? { ...p, powerUsed: true } : p)),
-            }
-          : null,
-      )
-      addToLog(`🛡️ ${targetPlayer.name} bloqueó la bala!`)
-      setLastShot("safe")
-    } else if (targetPlayer.lives > 1) {
-      setCurrentRoom((prev) =>
-        prev
-          ? {
-              ...prev,
-              participants: prev.participants.map((p) => (p.id === targetPlayer.id ? { ...p, lives: p.lives - 1 } : p)),
-            }
-          : null,
-      )
-      addToLog(`💔 ${targetPlayer.name} perdió una vida! (${targetPlayer.lives - 1} restantes)`)
-      setLastShot("bullet")
-    } else {
-      setCurrentRoom((prev) =>
-        prev
-          ? {
-              ...prev,
-              participants: prev.participants.map((p) => (p.id === targetPlayer.id ? { ...p, isAlive: false } : p)),
-            }
-          : null,
-      )
-      setEliminatedPlayer(targetPlayer.name)
-      setBulletsLeft((prev) => prev - 1)
-      setLastShot("bullet")
-      addToLog(`💀 ${targetPlayer.name} fue eliminado por ${currentPlayer.name}!`)
-
-      // Award points to shooter
-      setCurrentRoom((prev) =>
-        prev
-          ? {
-              ...prev,
-              participants: prev.participants.map((p) =>
-                p.id === currentPlayer.id ? { ...p, points: p.points + 100 } : p,
-              ),
-            }
-          : null,
-      )
-
-      checkGameEnd()
-    }
-
-    setBulletTargetMode(false)
-    nextTurn()
+    socketManager.emit("game:targetShoot", { targetId })
   }
 
-  const nextTurn = () => {
-    if (!currentRoom) return
-
-    const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-
-    if (doubleTurn) {
-      setDoubleTurn(false)
-      addToLog("🎲 Turno doble completado")
-    } else {
-      let nextIndex = (currentPlayerIndex + 1) % alivePlayers.length
-
-      if (skipNextTurn) {
-        const skippedPlayer = alivePlayers[nextIndex]
-        addToLog(`⚡ ${skippedPlayer.name} perdió su turno!`)
-        nextIndex = (nextIndex + 1) % alivePlayers.length
-        setSkipNextTurn(false)
-      }
-
-      setCurrentPlayerIndex(nextIndex)
-    }
-
-    setPeekResult(null)
-    setTargetingMode(false)
-  }
-
-  const checkGameEnd = () => {
-    if (!currentRoom) return
-
-    const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
-
-    if (alivePlayers.length <= 1) {
-      if (round < maxRounds) {
-        // Start next round
-        setRound((prev) => prev + 1)
-        setBulletsLeft(10)
-        setCurrentPlayerIndex(0)
-
-        // Reset some states for next round
-        setCurrentRoom((prev) =>
-          prev
-            ? {
-                ...prev,
-                participants: prev.participants.map((p) => ({
-                  ...p,
-                  isAlive: true,
-                  powerUsed: false,
-                  cursed: false,
-                  protected: false,
-                  lives: 1,
-                })),
-              }
-            : null,
-        )
-
-        addToLog(`🏁 Ronda ${round} completada! Comenzando ronda ${round + 1}...`)
-        setGameState("powers")
-        setCurrentPowerSelection(0)
-      } else {
-        setGameState("finished")
-        addToLog("🏆 ¡Juego terminado!")
-      }
-    }
-  }
-
-  const resetGame = () => {
-    localStorage.removeItem("currentRoom")
-    setCurrentRoom(null)
-    setGameMode("menu")
-    setGameState("lobby")
+  const resetGameState = () => {
     setCurrentPlayerIndex(0)
     setBulletsLeft(10)
     setRound(1)
@@ -556,20 +356,41 @@ export default function Component() {
     setCurrentEvent(null)
     setSkipNextTurn(false)
     setDoubleTurn(false)
+    setPlayerActions([])
+  }
+
+  const resetGame = () => {
+    leaveRoom()
+  }
+
+  // Show connection status if not connected
+  if (!isConnected) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4 flex items-center justify-center">
+        <Card className="border-red-800 bg-black/80 text-white">
+          <CardContent className="p-8 text-center">
+            <Wifi className="h-16 w-16 mx-auto mb-4 text-red-400" />
+            <h2 className="text-2xl font-bold text-red-400 mb-2">Conectando al servidor...</h2>
+            <p className="text-red-300">Por favor espera mientras establecemos la conexión</p>
+          </CardContent>
+        </Card>
+      </div>
+    )
   }
 
   if (gameMode === "menu") {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4">
+        <ConnectionStatus />
         <div className="mx-auto max-w-md">
           <Card className="border-red-800 bg-black/80 text-white">
             <CardHeader className="text-center">
               <CardTitle className="flex items-center justify-center gap-2 text-3xl font-bold text-red-400">
                 <Skull className="h-8 w-8" />
-                Ruleta Rusa Pro
+                Ruleta Rusa Online
                 <Skull className="h-8 w-8" />
               </CardTitle>
-              <p className="text-red-300">Multijugador • Poderes • Eventos</p>
+              <p className="text-red-300">Multijugador • Tiempo Real • Chat</p>
             </CardHeader>
             <CardContent className="space-y-4">
               <Input
@@ -596,6 +417,8 @@ export default function Component() {
                   Unirse a Sala
                 </Button>
               </div>
+
+              {session && <div className="text-center text-sm text-red-300">Sesión activa: {session.playerName}</div>}
             </CardContent>
           </Card>
         </div>
@@ -606,6 +429,7 @@ export default function Component() {
   if (gameMode === "create") {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4">
+        <ConnectionStatus />
         <div className="mx-auto max-w-md">
           <Card className="border-red-800 bg-black/80 text-white">
             <CardHeader className="text-center">
@@ -646,6 +470,7 @@ export default function Component() {
   if (gameMode === "join") {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4">
+        <ConnectionStatus />
         <div className="mx-auto max-w-md">
           <Card className="border-red-800 bg-black/80 text-white">
             <CardHeader className="text-center">
@@ -683,9 +508,14 @@ export default function Component() {
 
   const alivePlayers = currentRoom.participants.filter((p) => p.isAlive)
   const currentPlayer = alivePlayers[currentPlayerIndex]
+  const myParticipant = currentRoom.participants.find((p) => p.name === playerName)
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-red-900 via-red-800 to-black p-4">
+      <ConnectionStatus />
+      <PlayerActions actions={playerActions} />
+      <Chat isOpen={isChatOpen} onToggle={() => setIsChatOpen(!isChatOpen)} currentPlayerId={myParticipant?.id || 0} />
+
       <div className="mx-auto max-w-4xl">
         <Card className="border-red-800 bg-black/80 text-white">
           <CardHeader className="text-center">
@@ -702,6 +532,14 @@ export default function Component() {
               <span>
                 Ronda: {round}/{maxRounds}
               </span>
+              <Button
+                onClick={leaveRoom}
+                size="sm"
+                variant="outline"
+                className="border-red-600 text-red-300 bg-transparent"
+              >
+                Salir
+              </Button>
             </div>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -739,8 +577,11 @@ export default function Component() {
                           <Badge variant="outline" className="border-red-600 text-red-300">
                             #{index + 1}
                           </Badge>
-                          <span>{participant.name}</span>
+                          <span className={participant.isConnected ? "text-white" : "text-gray-400"}>
+                            {participant.name}
+                          </span>
                           {participant.name === currentRoom.host && <Badge className="bg-yellow-600">HOST</Badge>}
+                          {!participant.isConnected && <Badge className="bg-red-600">DESCONECTADO</Badge>}
                         </div>
                         <div className="flex items-center gap-2">
                           <Badge className="bg-green-700">
@@ -753,13 +594,19 @@ export default function Component() {
                   </div>
                 </div>
 
-                <Button
-                  onClick={startGame}
-                  disabled={currentRoom.participants.length < 2}
-                  className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3"
-                >
-                  {currentRoom.participants.length < 2 ? "Necesitas al menos 2 jugadores" : "Comenzar Juego"}
-                </Button>
+                {playerName === currentRoom.host && (
+                  <Button
+                    onClick={startGame}
+                    disabled={currentRoom.participants.length < 2}
+                    className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3"
+                  >
+                    {currentRoom.participants.length < 2 ? "Necesitas al menos 2 jugadores" : "Comenzar Juego"}
+                  </Button>
+                )}
+
+                {playerName !== currentRoom.host && (
+                  <div className="text-center text-red-300">Esperando que el host inicie el juego...</div>
+                )}
               </div>
             )}
 
@@ -779,40 +626,36 @@ export default function Component() {
                   </p>
                 </div>
 
-                <div className="grid gap-4">
-                  {POWERS.map((power) => (
-                    <Card
-                      key={power.id}
-                      className={`cursor-pointer transition-all border-2 ${
-                        currentRoom.participants[currentPowerSelection]?.power === power.id
-                          ? "border-yellow-500 bg-yellow-900/20"
-                          : "border-red-800 bg-red-950/30 hover:border-red-600"
-                      }`}
-                      onClick={() => selectPower(currentRoom.participants[currentPowerSelection]?.id, power.id)}
-                    >
-                      <CardContent className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className={`p-2 rounded-lg ${power.color}`}>{power.icon}</div>
-                          <div className="flex-1">
-                            <h3 className="font-bold text-white">{power.name}</h3>
-                            <p className="text-sm text-red-300">{power.description}</p>
+                {currentRoom.participants[currentPowerSelection]?.name === playerName ? (
+                  <div className="grid gap-4">
+                    {POWERS.map((power) => (
+                      <Card
+                        key={power.id}
+                        className={`cursor-pointer transition-all border-2 ${
+                          myParticipant?.power === power.id
+                            ? "border-yellow-500 bg-yellow-900/20"
+                            : "border-red-800 bg-red-950/30 hover:border-red-600"
+                        }`}
+                        onClick={() => selectPower(power.id)}
+                      >
+                        <CardContent className="p-4">
+                          <div className="flex items-center gap-3">
+                            <div className={`p-2 rounded-lg ${power.color}`}>{power.icon}</div>
+                            <div className="flex-1">
+                              <h3 className="font-bold text-white">{power.name}</h3>
+                              <p className="text-sm text-red-300">{power.description}</p>
+                            </div>
+                            {myParticipant?.power === power.id && <Badge className="bg-yellow-600">Seleccionado</Badge>}
                           </div>
-                          {currentRoom.participants[currentPowerSelection]?.power === power.id && (
-                            <Badge className="bg-yellow-600">Seleccionado</Badge>
-                          )}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-
-                <Button
-                  onClick={nextPowerSelection}
-                  disabled={!currentRoom.participants[currentPowerSelection]?.power}
-                  className="w-full bg-green-600 hover:bg-green-500"
-                >
-                  {currentPowerSelection < currentRoom.participants.length - 1 ? "Siguiente Jugador" : "Comenzar Ronda"}
-                </Button>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center text-red-300">
+                    Esperando que {currentRoom.participants[currentPowerSelection]?.name} seleccione su poder...
+                  </div>
+                )}
               </div>
             )}
 
@@ -860,6 +703,7 @@ export default function Component() {
                           Maldito
                         </Badge>
                       )}
+                      {!currentPlayer?.isConnected && <Badge className="bg-red-600">DESCONECTADO</Badge>}
                     </div>
                   </div>
 
@@ -874,7 +718,7 @@ export default function Component() {
                   )}
 
                   {/* Bullet Target Mode */}
-                  {bulletTargetMode && (
+                  {bulletTargetMode && currentPlayer?.name === playerName && (
                     <div className="space-y-4">
                       <h4 className="text-lg font-bold text-red-300">¡Tienes una BALA! Elige tu objetivo:</h4>
                       <div className="grid gap-2">
@@ -905,7 +749,7 @@ export default function Component() {
                     </div>
                   )}
 
-                  {!bulletTargetMode && (
+                  {!bulletTargetMode && currentPlayer?.name === playerName && currentPlayer?.isConnected && (
                     <Button
                       onClick={shoot}
                       className="bg-red-600 hover:bg-red-500 text-white font-bold py-4 px-8 text-xl"
@@ -913,6 +757,10 @@ export default function Component() {
                       <Target className="h-6 w-6 mr-2" />
                       DISPARAR
                     </Button>
+                  )}
+
+                  {currentPlayer?.name !== playerName && (
+                    <div className="text-center text-red-300">Esperando que {currentPlayer?.name} tome su turno...</div>
                   )}
                 </div>
 
@@ -929,7 +777,9 @@ export default function Component() {
                         <Badge variant="outline" className="border-red-600 text-red-300">
                           #{index + 1}
                         </Badge>
-                        <span className={index === currentPlayerIndex ? "font-bold text-white" : "text-red-200"}>
+                        <span
+                          className={`${index === currentPlayerIndex ? "font-bold text-white" : "text-red-200"} ${!participant.isConnected ? "opacity-50" : ""}`}
+                        >
                           {participant.name}
                         </span>
                         <div className="flex items-center gap-1 ml-auto">
@@ -953,6 +803,7 @@ export default function Component() {
                               <Skull className="h-3 w-3" />
                             </Badge>
                           )}
+                          {!participant.isConnected && <Badge className="bg-red-600 text-xs">OFF</Badge>}
                           {index === currentPlayerIndex && <Badge className="bg-red-600 text-white">TURNO</Badge>}
                         </div>
                       </div>
@@ -1004,6 +855,7 @@ export default function Component() {
                                 {POWERS.find((p) => p.id === participant.power)?.icon}
                               </div>
                             )}
+                            {!participant.isConnected && <Badge className="bg-red-600 text-xs">DESCONECTADO</Badge>}
                           </div>
                           <Badge className="bg-green-700">
                             <Coins className="h-3 w-3 mr-1" />
@@ -1015,11 +867,13 @@ export default function Component() {
                 </div>
 
                 <div className="flex gap-2">
-                  <Button onClick={resetGame} className="flex-1 bg-green-600 hover:bg-green-500">
-                    Nueva Partida
-                  </Button>
-                  <Button onClick={() => setGameMode("menu")} className="flex-1 bg-blue-600 hover:bg-blue-500">
-                    Menú Principal
+                  {playerName === currentRoom.host && (
+                    <Button onClick={startGame} className="flex-1 bg-green-600 hover:bg-green-500">
+                      Nueva Partida
+                    </Button>
+                  )}
+                  <Button onClick={resetGame} className="flex-1 bg-blue-600 hover:bg-blue-500">
+                    Salir de la Sala
                   </Button>
                 </div>
               </div>
